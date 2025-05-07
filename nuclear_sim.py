@@ -514,6 +514,22 @@ class NuclearSimulation:
         self.decay_counts = {"ALPHA": 0, "BETA_MINUS": 0, "BETA_PLUS": 0, "GAMMA": 0}
         self.decay_times = deque(maxlen=100)  # Store last 100 decay times
         
+        # Physics time step constraints
+        self.fixed_physics_dt = 1.0 / 240.0  # Fixed physics time step for stability
+        self.min_physics_dt = 1e-10          # Minimum physics time step
+        self.target_fps = FPS               # Target frame rate
+        self.fps_history = deque(maxlen=30)  # Store recent FPS values
+        self.adaptive_physics = True         # Enable adaptive physics based on FPS
+        self.physics_accuracy = 1.0          # Physics accuracy multiplier (1.0 = full accuracy)
+        self.max_substeps = 50              # Maximum number of substeps per frame
+        self.substeps_used = 0              # Track how many substeps were used in the last frame
+        
+        # New parameters for user control of physics
+        self.manual_accuracy = True         # Toggle between manual and adaptive accuracy
+        self.user_accuracy = 1.0             # User-controlled physics accuracy
+        self.user_max_substeps = 50          # User-controlled max substeps
+        self.user_fixed_dt = 1.0 / 240.0     # User-controlled fixed dt
+
         # Font for text display
         self.font = pygame.font.SysFont('Arial', 16)
         
@@ -688,15 +704,20 @@ class NuclearSimulation:
         __kernel void add_thermal_motion(__global float4* particles,
                                        int num_particles,
                                        float strength,
+                                       float temperature,
                                        unsigned int seed) {
             int gid = get_global_id(0);
             if (gid < num_particles) {
                 // Create a unique seed for each particle
                 unsigned int state = seed + gid;
                 
+                // Scale thermal motion with temperature (T in MeV)
+                // Nuclear temperatures can range from ~0.1 MeV to ~10 MeV
+                float temp_factor = sqrt(temperature);
+                
                 // Generate Gaussian random values using Box-Muller transform
-                float rx = rand_gaussian(&state) * strength;
-                float ry = rand_gaussian(&state) * strength;
+                float rx = rand_gaussian(&state) * strength * temp_factor;
+                float ry = rand_gaussian(&state) * strength * temp_factor;
                 
                 // Add small random movement to position
                 particles[gid].x += rx;
@@ -710,6 +731,7 @@ class NuclearSimulation:
                                           float2 nucleus_center,
                                           float region_radius,
                                           float strength,
+                                          float pressure,
                                           float dt) {
             int gid = get_global_id(0);
             if (gid >= num_particles) return;
@@ -719,14 +741,18 @@ class NuclearSimulation:
             float dy = particles[gid].y - nucleus_center.y;
             float dist = sqrt(dx*dx + dy*dy);
             
+            // Scale containment force with pressure parameter (normalized 0-1 value)
+            // Higher pressure = stronger containment force
+            float pressure_strength = strength * (1.0f + pressure * 5.0f);
+            
             // ONLY apply containment when particles get very far from nucleus
             // This is a gentle force that prevents simulation objects from flying away
             if (dist > region_radius) {
                 // Logarithmic force that increases with distance beyond threshold
-                float force = strength * log(dist / region_radius);
+                float force = pressure_strength * log(dist / region_radius);
                 
-                // Cap maximum force to prevent instability
-                force = min(force, 5.0f);
+                // Cap maximum force to prevent instability, but scale with pressure
+                force = min(force, 5.0f * (1.0f + pressure));
                 
                 // Apply force toward center only if beyond threshold, and SCALE WITH DT
                 if (dist > 0.0f) {
@@ -734,6 +760,14 @@ class NuclearSimulation:
                     particles[gid].z -= dx * force / dist * (1.0f / dt);
                     particles[gid].w -= dy * force / dist * (1.0f / dt);
                 }
+            }
+            
+            // Apply pressure globally - creates compression effect
+            // This represents external pressure on the nucleus
+            if (pressure > 0.01f && dist > 0.01f) {
+                float compression = pressure * 0.5f * exp(-dist / (region_radius * 0.5f));
+                particles[gid].z -= dx * compression / dist;
+                particles[gid].w -= dy * compression / dist;
             }
         }
         
@@ -749,7 +783,9 @@ class NuclearSimulation:
                                            float pauli_strength,
                                            float gravity_strength,
                                            float weak_strength,
-                                           float dt_factor) {
+                                           float dt_factor,
+                                           float temperature,
+                                           float pressure) {
             int i = get_global_id(0);
             if (i >= num_particles) return;
             
@@ -768,6 +804,13 @@ class NuclearSimulation:
             float nucleon_radius = 2.5f;
             float max_force = 12.0f;  // Increased for stronger nuclear binding
             float epsilon = 0.15f;    // Better stability
+            
+            // Temperature effects on force strength
+            // Higher temperature reduces effective binding through thermal motion
+            float temp_factor = 1.0f / (1.0f + temperature * 0.1f);
+            
+            // Pressure effects - increases binding energy
+            float pressure_factor = 1.0f + pressure * 0.5f;
             
             // Compute forces from all other particles
             for (int j = 0; j < max_interactions; j++) {
@@ -822,18 +865,81 @@ class NuclearSimulation:
                 // Cap strong force
                 strong_force = clamp(strong_force, -max_force, max_force);
                 
+                // Apply strong force scaling factors
+                strong_force *= temp_factor * pressure_factor;
+                
+                // Add strong force contribution
                 net_force += strong_force;
                 
-                // ...rest of existing forces calculations...
+                // Coulomb force - only between protons
+                // This correctly models the electromagnetic repulsion
+                if (type_i == 0 && type_j == 0) {  // Both are protons
+                    // Long-range repulsive force
+                    float coulomb_force = -coulomb_strength / (dist2 + epsilon);
+                    
+                    // Temperature doesn't significantly affect Coulomb force
+                    // Cap to prevent instability
+                    coulomb_force = max(coulomb_force, -max_force * 0.5f);
+                    
+                    net_force += coulomb_force;
+                }
+                
+                // Pauli exclusion principle - stronger between same particle types
+                // Creates repulsion between identical nucleons at close range
+                if (type_i == type_j) {  // Same type: p-p or n-n
+                    float pauli_range = 8.0f;
+                    float pauli_ratio = dist / pauli_range;
+                    
+                    if (dist < pauli_range) {
+                        // Short range effect based on quantum mechanical principle
+                        float pauli_effect = -pauli_strength * exp(-pauli_ratio * 2.0f);
+                        pauli_effect *= temp_factor;  // Temperature affects quantum effects
+                        
+                        // Cap to prevent instability
+                        pauli_effect = max(pauli_effect, -max_force * 0.4f);
+                        
+                        net_force += pauli_effect;
+                    }
+                }
                 
                 // Improved symmetry energy - enhanced to maintain proper n/p distribution
                 if (type_i != type_j) {
                     float symmetry_range = 9.0f;  // Increased range
                     float symmetry_factor = exp(-dist / symmetry_range);
-                    net_force += 0.2f * pauli_strength * symmetry_factor;  // Increased attraction between n-p
+                    float symmetry_force = 0.2f * pauli_strength * symmetry_factor;
+                    
+                    // Scale with temperature and pressure
+                    symmetry_force *= temp_factor * pressure_factor;
+                    
+                    net_force += symmetry_force;
                 }
                 
-                // ...existing code that applies the forces...
+                // Weak nuclear force - critical for beta decay processes
+                // The weak force has very short range but is needed for realistic modeling
+                float weak_range = 2.0f;  // Very short range (~1 fm)
+                if (dist < weak_range) {
+                    // The weak force affects neutron-proton interactions in particular
+                    float weak_effect = weak_strength * exp(-dist / weak_range);
+                    
+                    // Temperature affects weak force less than strong force
+                    weak_effect *= (1.0f / (1.0f + temperature * 0.05f));
+                    
+                    net_force += weak_effect;
+                }
+                
+                // Gravitational force - extremely weak at nuclear scale but included for completeness
+                // In reality, gravity is negligible at this scale
+                float grav_force = gravity_strength / dist2;
+                net_force += grav_force;
+                
+                // Apply the net force along the direction vector
+                if (dist > 0) {
+                    float fx = dx * net_force / dist;
+                    float fy = dy * net_force / dist;
+                    
+                    totalFx += fx;
+                    totalFy += fy;
+                }
             }
             
             // Apply a gentler center-of-mass force that doesn't artificially compact the nucleus
@@ -843,13 +949,20 @@ class NuclearSimulation:
             float center_dist2 = center_dx*center_dx + center_dy*center_dy;
             float center_dist = sqrt(center_dist2);
             
-            // Nuclear radius formula
+            // Nuclear radius formula - r = r0 * A^(1/3)
+            // r0 is approximately 1.2 fm in nuclear physics
             float nuclear_radius = 1.2f * pow(num_particles, 1.0f/3.0f) * 2.0f;
+            
+            // Scale radius with pressure - compression effect
+            nuclear_radius /= (1.0f + pressure * 0.2f);
             
             if (center_dist > nuclear_radius * 1.5f) {
                 // Only apply centering force when particles are too far from nucleus
                 // This prevents artificial compaction while still maintaining cohesion
                 float center_force = 0.03f * (center_dist - nuclear_radius);
+                
+                // Scale with pressure
+                center_force *= (1.0f + pressure * 2.0f);
                 
                 if (center_dist > 0.01f) {
                     // Add centering force, proportional to distance beyond expected radius
@@ -858,7 +971,11 @@ class NuclearSimulation:
                 }
             }
             
-            // ...rest of existing code...
+            // Store the final force vector
+            forces[i].x = totalFx;
+            forces[i].y = totalFy;
+            forces[i].z = 0.0f;  // Not used
+            forces[i].w = 0.0f;  // Not used
         }
         """
         try:
@@ -923,61 +1040,73 @@ class NuclearSimulation:
     
     def update_simulation(self, dt):
         """Update the simulation state"""
-        real_dt = dt * self.time_scale
+        # Store recent FPS for adaptive physics
+        current_fps = 1.0 / dt if dt > 0 else self.target_fps
+        self.fps_history.append(current_fps)
+        avg_fps = sum(self.fps_history) / len(self.fps_history) if self.fps_history else current_fps
         
-        # Set quantum time mode flag for visual effects
-        self.quantum_time_mode = self.time_scale < 1e-15
+        # Calculate desired time advancement for this frame
+        desired_dt = dt * self.time_scale
+        self.time_passed += desired_dt
+        self.update_camera(dt)  # Use real dt for camera updates, not scaled
         
-        # Special handling for quantum time scales
-        if self.quantum_time_mode:
-            # Use a minimum dt value to prevent instability
-            real_dt = max(real_dt, 1e-10 / FPS)
-            # In quantum mode, we might want to use a different physics model
-            # This could be expanded later for quantum effects
+        # Determine physics step size based on performance
+        if not self.manual_accuracy and self.adaptive_physics and avg_fps < 0.8 * self.target_fps:
+            # If FPS is dropping, reduce physics accuracy but maintain time scale
+            self.physics_accuracy = max(0.2, min(1.0, self.target_fps / max(1.0, avg_fps)))
+        else:
+            # If manual accuracy is enabled, use the user-specified value
+            self.physics_accuracy = self.user_accuracy if self.manual_accuracy else 1.0
         
-        self.time_passed += real_dt
-        self.update_camera(real_dt)
+        # Use fixed size physics steps for stability
+        physics_dt = self.user_fixed_dt * (2.0 - self.physics_accuracy)  # Larger dt when accuracy is reduced
         
-        # Update decays
-        if self.nucleus and self.nucleus.should_decay(real_dt):
-            new_particles = self.nucleus.decay()
-            if new_particles:
-                self.particles.extend(new_particles)
-                self.nucleus.update_particles()
-                last_decay = self.nucleus.decay_history[-1]
-                if last_decay == DecayType.ALPHA:
-                    self.decay_counts["ALPHA"] += 1
-                elif last_decay == DecayType.BETA_MINUS:
-                    self.decay_counts["BETA_MINUS"] += 1
-                elif last_decay == DecayType.BETA_PLUS:
-                    self.decay_counts["BETA_PLUS"] += 1
-                elif last_decay == DecayType.GAMMA:
-                    self.decay_counts["GAMMA"] += 1
-                self.decay_times.append(self.time_passed)
+        # Calculate number of physics steps needed
+        num_steps = max(1, min(self.user_max_substeps, int(desired_dt / physics_dt)))
+        self.substeps_used = num_steps
         
-        # Update decay particles - move them and handle lifetime
-        particles_to_keep = []
-        for particle in self.particles:
-            # Update position based on velocity
-            particle.x += particle.vx * real_dt
-            particle.y += particle.vy * real_dt
-            
-            # Update age and check if particle should still exist
-            particle.age += real_dt
-            if particle.age < particle.lifetime:
-                particles_to_keep.append(particle)
+        # Apply multiple small physics steps instead of one large step
+        for _ in range(num_steps):
+            # Update decay particles - move them and handle lifetime
+            particles_to_keep = []
+            for particle in self.particles:
+                # Update position based on velocity - use small step
+                particle.x += particle.vx * physics_dt
+                particle.y += particle.vy * physics_dt
                 
-        # Remove expired particles
-        self.particles = particles_to_keep
-        
-        # Update particle positions - GPU only
-        if self.nucleus:
-            self.update_nucleus_gpu(real_dt)
-        
-        # After GPU update, explicitly resolve any remaining overlaps
+                # Update age and check if particle should still exist
+                particle.age += desired_dt / num_steps  # Use desired time for age calculation
+                if particle.age < particle.lifetime:
+                    particles_to_keep.append(particle)
+                    
+            # Remove expired particles
+            self.particles = particles_to_keep
+            
+            # Update nucleus physics with small step
+            if self.nucleus and self.nucleus.should_decay(desired_dt / num_steps):
+                new_particles = self.nucleus.decay()
+                if new_particles:
+                    self.particles.extend(new_particles)
+                    self.nucleus.update_particles()
+                    last_decay = self.nucleus.decay_history[-1]
+                    if last_decay == DecayType.ALPHA:
+                        self.decay_counts["ALPHA"] += 1
+                    elif last_decay == DecayType.BETA_MINUS:
+                        self.decay_counts["BETA_MINUS"] += 1
+                    elif last_decay == DecayType.BETA_PLUS:
+                        self.decay_counts["BETA_PLUS"] += 1
+                    elif last_decay == DecayType.GAMMA:
+                        self.decay_counts["GAMMA"] += 1
+                    self.decay_times.append(self.time_passed)
+            
+            # Update nucleus particles - use small physics step size for stability
+            if self.nucleus:
+                self.update_nucleus_gpu(physics_dt)
+                
+        # After all physics steps, resolve any remaining overlaps
         if self.nucleus:
             self.resolve_overlapping_particles()
-    
+
     def run_kernel_with_timeout(self, kernel_func, *args):
         """Run an OpenCL kernel with a timeout to prevent hangs"""
         result = [None]
@@ -1028,11 +1157,11 @@ class NuclearSimulation:
             local_size = None
             
             try:
-                # Use time_scale as dt_factor for force scaling
-                dt_factor = self.time_scale if self.time_scale > 1.0 else 1.0
+                # Use a constant dt_factor for force calculations regardless of time scale
+                dt_factor = 1.0  # Always use standard force strength
                 nucleus_center = np.array([self.nucleus.x, self.nucleus.y], dtype=np.float32)
                 
-                # Calculate forces with time scaling to prevent escaping at high speeds
+                # Calculate forces with consistent physics regardless of time scale
                 event = self.program.physical_nuclear_forces(
                     self.queue, global_size, local_size,
                     d_particles.data, d_forces.data, d_types.data,
@@ -1042,7 +1171,9 @@ class NuclearSimulation:
                     np.float32(PAULI_STRENGTH),
                     np.float32(GRAVITY_STRENGTH),
                     np.float32(WEAK_FORCE_STRENGTH),
-                    np.float32(dt_factor)  # Pass time scaling factor
+                    np.float32(dt_factor),  # Consistently use 1.0 here
+                    np.float32(0.0),  # Default temperature
+                    np.float32(0.0)   # Default pressure
                 )
                 event.wait()
                 
@@ -1061,7 +1192,7 @@ class NuclearSimulation:
                     self.queue, global_size, local_size,
                     d_particles.data, np.int32(num_particles),
                     nucleus_center, np.float32(containment_radius),
-                    np.float32(containment_strength), np.float32(dt)
+                    np.float32(containment_strength), np.float32(0.0), np.float32(dt)
                 )
                 event.wait()
                 
@@ -1072,7 +1203,7 @@ class NuclearSimulation:
                     event = self.program.add_thermal_motion(
                         self.queue, global_size, local_size,
                         d_particles.data, np.int32(num_particles),
-                        np.float32(thermal_strength), seed
+                        np.float32(thermal_strength), np.float32(0.0), seed
                     )
                     event.wait()
                     
@@ -1323,22 +1454,53 @@ class NuclearSimulation:
             self.screen.blit(text, (info_x, info_y))
             info_y += line_height * 2
         
-        # Modified time scale display
+        # Modified time scale display with substep indicator
         time_scale_color = (255, 255, 255)
         if self.quantum_time_mode:
             time_scale_color = (100, 255, 255)  # Cyan for quantum time
-            
+        
         time_scale_text = f"Time Scale: {self.format_time_scale()}"
         text = self.font.render(time_scale_text, True, time_scale_color)
         self.screen.blit(text, (info_x, info_y))
         info_y += line_height
         
-        # Add quantum time indicator if in quantum mode
-        if self.quantum_time_mode:
-            quantum_text = "QUANTUM TIME SCALE"
-            text = self.font.render(quantum_text, True, (100, 255, 255))
+        # Show physics substep information when active
+        if self.substeps_used > 1:
+            substeps_color = (255, 200, 100) if self.substeps_used < self.user_max_substeps else (255, 100, 100)
+            substep_text = f"Physics substeps: {self.substeps_used}/{self.user_max_substeps}"
+            text = self.font.render(substep_text, True, substeps_color)
             self.screen.blit(text, (info_x, info_y))
             info_y += line_height
+        
+        # Show physics accuracy when adaptive
+        accuracy_mode = "Manual" if self.manual_accuracy else "Adaptive"
+        accuracy_value = self.user_accuracy if self.manual_accuracy else self.physics_accuracy
+        accuracy_color = (100, 255, 100) if self.manual_accuracy else (255, 200, 100)
+        accuracy_text = f"Physics accuracy: {accuracy_value:.2f} ({accuracy_mode})"
+        text = self.font.render(accuracy_text, True, accuracy_color)
+        self.screen.blit(text, (info_x, info_y))
+        info_y += line_height
+        
+        # Show fixed dt value
+        dt_text = f"Fixed dt: {self.user_fixed_dt:.6f}s"
+        text = self.font.render(dt_text, True, (200, 200, 255))
+        self.screen.blit(text, (info_x, info_y))
+        info_y += line_height
+        
+        # Add new control instructions
+        info_y += line_height
+        text = self.font.render("M: Toggle manual/adaptive accuracy", True, (200, 200, 200))
+        self.screen.blit(text, (info_x, info_y))
+        info_y += line_height
+        text = self.font.render("[/]: Adjust simulation accuracy", True, (200, 200, 200))
+        self.screen.blit(text, (info_x, info_y))
+        info_y += line_height
+        text = self.font.render("-/+: Adjust max substeps", True, (200, 200, 200))
+        self.screen.blit(text, (info_x, info_y))
+        info_y += line_height
+        text = self.font.render(",/.: Adjust fixed dt", True, (200, 200, 200))
+        self.screen.blit(text, (info_x, info_y))
+        info_y += line_height
         
         text = self.font.render(f"Simulation Time: {self.time_passed:.1f}s", True, (255, 255, 255))
         self.screen.blit(text, (info_x, info_y))
@@ -1498,6 +1660,34 @@ class NuclearSimulation:
                     if self.nucleus:
                         self.camera_target_x = self.nucleus.x
                         self.camera_target_y = self.nucleus.y
+                elif event.key == pygame.K_m:
+                    # Toggle between manual and adaptive physics accuracy
+                    self.manual_accuracy = not self.manual_accuracy
+                    logger.info(f"Physics accuracy mode: {'Manual' if self.manual_accuracy else 'Adaptive'}")
+                elif event.key == pygame.K_HOME:
+                    # Decrease physics accuracy (higher value = less accurate but faster)
+                    self.user_accuracy = max(0.1, self.user_accuracy - 0.1)
+                    logger.info(f"Manual physics accuracy set to {self.user_accuracy:.1f}")
+                elif event.key == pygame.K_INSERT:
+                    # Increase physics accuracy (up to 1.0 = full accuracy)
+                    self.user_accuracy = min(1.0, self.user_accuracy + 0.1)
+                    logger.info(f"Manual physics accuracy set to {self.user_accuracy:.1f}")
+                elif event.key == pygame.K_MINUS:
+                    # Decrease max substeps
+                    self.user_max_substeps = max(5, self.user_max_substeps - 5)
+                    logger.info(f"Max substeps set to {self.user_max_substeps}")
+                elif event.key == pygame.K_EQUALS:  # This is the + key without shift
+                    # Increase max substeps
+                    self.user_max_substeps = min(200, self.user_max_substeps + 5)
+                    logger.info(f"Max substeps set to {self.user_max_substeps}")
+                elif event.key == pygame.K_COMMA:
+                    # Decrease fixed dt (more accurate physics but slower)
+                    self.user_fixed_dt = max(1.0/500.0, self.user_fixed_dt * 0.9)
+                    logger.info(f"Fixed dt set to {self.user_fixed_dt:.6f}")
+                elif event.key == pygame.K_PERIOD:
+                    # Increase fixed dt (less accurate physics but faster)
+                    self.user_fixed_dt = min(1.0/60.0, self.user_fixed_dt * 1.1)
+                    logger.info(f"Fixed dt set to {self.user_fixed_dt:.6f}")
         keys = pygame.key.get_pressed()
         move_speed = 5.0 / self.zoom_level
         if keys[pygame.K_w]:
