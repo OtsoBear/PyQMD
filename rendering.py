@@ -7,7 +7,7 @@ class Renderer:
         self.screen = screen
         self.width = screen.get_width()
         self.height = screen.get_height()
-        self.simulation_width = min(800, self.width - 400)  # Adjust simulation area
+        self.simulation_width = min(800, self.width - 550)  # Reserve space for info and decay chain
         self.simulation_height = self.height 
         self.font = pygame.font.SysFont('Arial', 16)
         self.small_font = pygame.font.SysFont('Arial', 14)
@@ -16,15 +16,18 @@ class Renderer:
         self.info_panel_scroll = 0  # Scrolling offset for info panel
         self.decay_chain_scroll = 0  # Track scrolling for decay chain
         self.max_decay_scroll = 0    # Maximum scroll value for decay chain
-    
+        
     def resize(self, width, height):
         """Update renderer dimensions after window resize"""
         self.width = width
         self.height = height
-        self.simulation_width = min(800, width - 400)  # Reserve space for info panel
+        self.simulation_width = min(800, width - 550)  # Reserve more space for info + decay chain
         self.simulation_height = height
         # Clear text cache on resize
         self.cache = {}
+        # Reset scrolling
+        self.info_panel_scroll = 0
+        self.decay_chain_scroll = 0
     
     def render(self, nucleus, particles, camera_pos, zoom, time_scale, 
               accuracy, physics_dt, substeps, max_substeps, gpu_available,
@@ -32,8 +35,8 @@ class Renderer:
         self.screen.fill((0, 0, 0))
         self.draw_ruler(camera_pos, zoom)
         
-        # Ensure zoom is properly applied
-        effective_zoom = max(0.1, zoom)  # Prevent zoom from being too small
+        # Draw simulation elements
+        effective_zoom = max(0.1, zoom)
         
         if nucleus:
             sorted_particles = sorted(nucleus.particles, key=lambda p: p.y)
@@ -44,8 +47,13 @@ class Renderer:
             fade = particle.age / particle.lifetime if particle.lifetime < float('inf') else 0
             self.draw_particle(particle, camera_pos, effective_zoom, fade)
         
-        self.draw_info_panel(nucleus, effective_zoom, time_scale, accuracy, physics_dt, 
+        # Draw information panels
+        self.draw_info_panel(nucleus, zoom, time_scale, accuracy, physics_dt, 
                           substeps, max_substeps, gpu_available, decay_counts, time_passed)
+        
+        # Draw decay chain panel if applicable
+        if nucleus and hasattr(nucleus, 'decay_chain') and len(nucleus.decay_chain) > 1:
+            self.draw_decay_chain(nucleus)
         
         pygame.display.flip()
     
@@ -126,25 +134,25 @@ class Renderer:
     
     def draw_info_panel(self, nucleus, zoom, time_scale, accuracy, physics_dt, 
                       substeps, max_substeps, gpu_available, decay_counts, time_passed):
-        # Collect all info panel items first
-        self.info_items = []  # Reset items
-        
-        # Fixed position for info panel
+        """Draw main information panel on the left side"""
         x = self.simulation_width + 20
         y = 20 - self.info_panel_scroll  # Apply scroll offset
         line_height = 25
         
-        # Helper to add items to the info panel
+        # Helper to add items with y-coordinate tracking
         def add_item(key, text, color):
-            self.info_items.append((key, text, color, x, y))
+            if 0 <= y <= self.height:  # Only render if in view
+                self.screen.blit(self.get_text(key, text, color), (x, y))
             return y + line_height
         
-        # Add all info items
+        # Display acceleration mode (GPU/CPU)
         y = add_item("accel", f"Acceleration: {'GPU' if gpu_available else 'CPU'}", 
                     (100, 255, 100) if gpu_available else (255, 100, 100))
         
+        # Display current zoom level
         y = add_item("zoom", f"Zoom: {zoom:.1f}x", (200, 200, 255))
         
+        # Display nucleus information if available
         if nucleus:
             p, n = nucleus.protons, nucleus.neutrons
             element_name, symbol = self.get_element_name(p)
@@ -157,6 +165,7 @@ class Renderer:
             
             y = add_item("neutrons", f"Neutrons: {n}", (100, 100, 255))
             
+            # Display half-life information with appropriate units
             half_life = nucleus.stability
             if half_life == float('inf'):
                 stability_text = "Stable"
@@ -182,6 +191,7 @@ class Renderer:
                 
             y = add_item("halflife", f"Half-life: {stability_text}", stability_color)
             
+            # Display decay statistics
             y += line_height
             y = add_item("decays", "Decay Statistics:", (255, 255, 255))
             
@@ -201,16 +211,16 @@ class Renderer:
                                f"{decay_type}: {count}", 
                                colors.get(decay_type, (200, 200, 200)))
         
+        # Display time information
         y += line_height
-        
-        # Show simulation time with appropriate units
         time_value, time_unit = self.format_time_value(time_passed)
         y = add_item("simtime", f"Simulation Time: {time_value:.2f} {time_unit}", (255, 255, 255))
         
-        # Show time scale with appropriate units
+        # Display time scale with appropriate units
         time_text = self.format_time_scale(time_scale)
         y = add_item("time", f"Time Scale: {time_text}", (255, 255, 255))
         
+        # Display physics simulation parameters
         if substeps > 0:
             ratio = substeps / max_substeps if max_substeps > 0 else 0
             color = (255, 100, 100) if ratio > 0.95 else (255, 200, 100) if ratio > 0.75 else (100, 255, 100)
@@ -218,104 +228,9 @@ class Renderer:
             
             y = add_item("dt", f"Physics dt: {physics_dt:.6f}s", (200, 200, 255))
             
-            y = add_item("accuracy", f"Physics accuracy: {accuracy:.2f}", (200, 200, 255))
         
-        # Draw decay chain if nucleus exists and has actual decays
-        if nucleus and hasattr(nucleus, 'decay_chain') and len(nucleus.decay_chain) > 1:
-            y += line_height
-            self.screen.blit(self.get_text("decay_chain_title", "Decay Chain:", (255, 220, 150)), (x, y))
-            y += line_height
-            
-            # Show the complete chain, not just the last 5 items
-            # Skip the initial state (index 0) which isn't a real decay
-            full_decay_chain = nucleus.decay_chain[1:] if len(nucleus.decay_chain) > 1 else []
-            
-            # Apply scroll offset if chain is too long
-            chain_area_height = self.height - y - 200  # Reserve space for other info
-            visible_items = max(1, int(chain_area_height / line_height))
-            
-            # Calculate max scroll based on chain length
-            self.max_decay_scroll = max(0, len(full_decay_chain) - visible_items)
-            
-            # Apply scrolling to select which items to show
-            scroll_start = min(self.decay_chain_scroll, self.max_decay_scroll)
-            end_idx = min(len(full_decay_chain), scroll_start + visible_items)
-            
-            # Show scrolling indicators if needed
-            if self.max_decay_scroll > 0:
-                # Show up/down indicators if there are more items
-                if scroll_start > 0:
-                    self.screen.blit(self.get_text("scroll_up", "↑ More ↑", (180, 180, 180)), (x + 50, y - line_height))
-                if scroll_start < self.max_decay_scroll:
-                    # Calculate position for the "more" indicator at bottom of visible area
-                    bottom_y = y + (visible_items * line_height)
-                    self.screen.blit(self.get_text("scroll_down", "↓ More ↓", (180, 180, 180)), (x + 50, bottom_y))
-            
-            # Get the visible portion of the chain based on scroll position
-            display_chain = full_decay_chain[scroll_start:end_idx]
-                
-            # Draw numbering to show progress through the chain
-            chain_header = f"Decays ({scroll_start+1}-{end_idx} of {len(full_decay_chain)})"
-            self.screen.blit(self.get_text("chain_count", chain_header, (220, 220, 220)), (x, y))
-            y += line_height
-            
-            # Draw each step in the chain
-            for i, step in enumerate(display_chain):
-                try:
-                    # Check if the step tuple includes decay time (6 elements)
-                    if len(step) >= 6:
-                        orig_element, orig_mass, decay_type, new_element, new_mass, decay_time = step
-                    else:
-                        # Handle older format tuples with 5 elements (no decay time)
-                        orig_element, orig_mass, decay_type, new_element, new_mass = step
-                        decay_time = 0
-                    
-                    # Ensure proper formatting by converting to strings
-                    orig_element = str(orig_element)
-                    orig_mass = str(orig_mass)
-                    decay_type = str(decay_type)
-                    new_element = str(new_element)
-                    new_mass = str(new_mass)
-                    
-                    # Fix common display issues with decay symbols
-                    if decay_type == "a":
-                        decay_type = "α"
-                    elif decay_type == "b-":
-                        decay_type = "β-"
-                    elif decay_type == "b+":
-                        decay_type = "β+"
-                    elif decay_type == "g":
-                        decay_type = "γ"
-                    
-                    # Highlight current isotope
-                    is_current = (i == len(display_chain) - 1)
-                    color = (255, 255, 100) if is_current else (200, 200, 200)
-                    
-                    # Format the decay time with appropriate units
-                    # Always show a decay time, even if it's very small
-                    if decay_time == 0:
-                        # For zero decay times (initial state or extremely fast decays),
-                        # show a dash or indicate instantaneous
-                        time_str = " [initial]" if i == 0 else " [<1 fs]"
-                    else:
-                        # Get time with appropriate units
-                        time_str = " [" + self.format_time_value_with_unit(decay_time) + "]"
-                    
-                    # Format as: U-238 → Th-234 (α) [10.5 s]
-                    decay_text = f"{scroll_start+i+1}. {orig_element}-{orig_mass} → {new_element}-{new_mass} ({decay_type}){time_str}"
-                    
-                    self.screen.blit(self.get_text(f"decay_step_{scroll_start+i}", decay_text, color), (x, y))
-                    y += line_height
-                except Exception as e:
-                    # If there's an error in formatting, show a debug version
-                    self.screen.blit(self.get_text(f"decay_step_error_{i}", 
-                                                f"Error displaying decay step: {str(step)}", 
-                                                (255, 100, 100)), (x, y))
-                    y += line_height
-            
-        y += line_height
-        
-        # Controls section
+        # Display controls
+        y += line_height * 2
         y = add_item("controls0", "Controls:", (255, 255, 150))
         y = add_item("controls1", "WASD: Move camera", (200, 200, 200))
         y = add_item("controls2", "Q/E: Zoom in/out", (200, 200, 200))
@@ -327,45 +242,155 @@ class Renderer:
         y = add_item("controls8", "SPACE: Force decay", (200, 200, 200))
         y = add_item("controls9", "1-9: Select isotopes", (200, 200, 200))
         y = add_item("controls10", "R/T/H/J/Y/B: Time presets", (200, 200, 200))
-        y = add_item("controls11", "Scroll wheel: Zoom", (200, 200, 200))
-        y = add_item("controls_pgupdn", "PgUp/PgDn: Scroll decay chain", (200, 200, 200))
-        y = add_item("controls_reset_chain", "C: Reset decay chain scroll", (200, 200, 200))
-        
-        # Calculate maximum scroll value
-        max_content_height = y + self.info_panel_scroll  # Total content height
-        visible_height = self.height - 40  # Visible area height with padding
-        self.max_scroll = max(0, max_content_height - visible_height)
-        
-        # Draw scroll indicators if needed
-        if self.max_scroll > 0:
-            # Draw scrollbar background
-            scrollbar_x = self.width - 15
-            scrollbar_height = self.height - 40
-            pygame.draw.rect(self.screen, (50, 50, 50), 
-                          (scrollbar_x, 20, 10, scrollbar_height))
-            
-            # Draw scroll handle
-            scroll_ratio = self.info_panel_scroll / self.max_scroll
-            handle_height = max(30, scrollbar_height * visible_height / max_content_height)
-            handle_y = 20 + scroll_ratio * (scrollbar_height - handle_height)
-            pygame.draw.rect(self.screen, (150, 150, 150), 
-                          (scrollbar_x, handle_y, 10, handle_height))
-            
-            # Draw indicators
-            if self.info_panel_scroll > 0:
-                pygame.draw.polygon(self.screen, (200, 200, 200), 
-                                 [(self.width-20, 15), (self.width-10, 15), (self.width-15, 5)])
-            
-            if self.info_panel_scroll < self.max_scroll:
-                pygame.draw.polygon(self.screen, (200, 200, 200), 
-                                 [(self.width-20, self.height-15), (self.width-10, self.height-15), 
-                                  (self.width-15, self.height-5)])
-        
-        # Now render all visible items
-        for key, text, color, item_x, item_y in self.info_items:
-            if 10 <= item_y <= self.height - 10:  # Only draw if in visible area
-                self.screen.blit(self.get_text(key, text, color), (item_x, item_y))
+        y = add_item("controls11", "PgUp/PgDn: Scroll decay chain", (200, 200, 200))
+        y = add_item("controls12", "C: Reset decay chain scroll", (200, 200, 200))
     
+    def draw_decay_chain(self, nucleus):
+        """Draw decay chain panel on the right side of the screen"""
+        # Position the decay chain panel on the right
+        x = self.width - 320  # Right side with margin
+        panel_width = 300
+        
+        # Draw background for the decay chain panel
+        pygame.draw.rect(self.screen, (30, 30, 40), 
+                        (x - 10, 10, panel_width, self.height - 20))
+        
+        # Draw header
+        y = 20
+        line_height = 25
+        
+        # Draw title
+        title = "Decay Chain"
+        self.screen.blit(self.get_text("decay_chain_title", title, (255, 220, 150)), 
+                        (x + panel_width//2 - len(title)*4, y))
+        y += line_height * 1.5
+        
+        # Get decay chain (skip initial state)
+        full_decay_chain = nucleus.decay_chain[1:] if len(nucleus.decay_chain) > 1 else []
+        
+        # If no decays yet, show current isotope
+        if not full_decay_chain:
+            if nucleus.decay_chain:  # Make sure there's at least an initial state
+                initial = nucleus.decay_chain[0]
+                element, mass = initial[0], initial[1]
+                status_text = f"Current: {element}-{mass}"
+                self.screen.blit(self.get_text("current_isotope", 
+                                             status_text, (200, 200, 255)), 
+                                (x + panel_width//2 - len(status_text)*4, y))
+            return
+        
+        # Apply scrolling to select which items to show
+        chain_area_height = self.height - y - 40
+        visible_items = max(1, int(chain_area_height / (line_height * 2.5)))  # Each entry takes ~2.5 lines
+        
+        # Calculate max scroll based on chain length
+        self.max_decay_scroll = max(0, len(full_decay_chain) - visible_items)
+        
+        # Clamp scroll value - ensure it's never negative
+        self.decay_chain_scroll = max(0, min(self.decay_chain_scroll, self.max_decay_scroll))
+        scroll_start = self.decay_chain_scroll
+        end_idx = min(len(full_decay_chain), scroll_start + visible_items)
+        
+        # Show scrolling indicators and count
+        scroll_info = f"({scroll_start+1}-{end_idx} of {len(full_decay_chain)})"
+        self.screen.blit(self.get_text("chain_count", scroll_info, (180, 180, 180)), 
+                        (x + panel_width//2 - len(scroll_info)*4, y))
+        y += line_height
+        
+        # Show up/down indicators if there are more items
+        if scroll_start > 0:
+            self.screen.blit(self.get_text("scroll_up", "↑ More ↑", (180, 180, 180)), 
+                            (x + panel_width//2 - 30, y - line_height))
+            
+        if scroll_start < self.max_decay_scroll:
+            # Position the bottom indicator
+            bottom_y = self.height - 30
+            self.screen.blit(self.get_text("scroll_down", "↓ More ↓", (180, 180, 180)), 
+                            (x + panel_width//2 - 30, bottom_y))
+        
+        # Show scrolling help text
+        self.screen.blit(self.get_text("scroll_help", "Use PgUp/PgDn or mouse wheel to scroll", 
+                                     (150, 150, 150)), (x, y))
+        y += line_height * 1.5
+        
+        # Get the visible portion of the chain
+        display_chain = full_decay_chain[scroll_start:end_idx]
+        
+        # Draw each decay step
+        for i, step in enumerate(display_chain):
+            try:
+                # Extract decay information including time
+                if len(step) >= 6:
+                    orig_element, orig_mass, decay_type, new_element, new_mass, decay_time = step
+                else:
+                    orig_element, orig_mass, decay_type, new_element, new_mass = step
+                    decay_time = 0
+                
+                # Ensure proper formatting
+                orig_element = str(orig_element)
+                orig_mass = str(orig_mass)
+                decay_type = str(decay_type)
+                new_element = str(new_element)
+                new_mass = str(new_mass)
+                
+                # Fix decay symbols if needed
+                if decay_type == "a":
+                    decay_type = "α"
+                elif decay_type == "b-":
+                    decay_type = "β-"
+                elif decay_type == "b+":
+                    decay_type = "β+"
+                elif decay_type == "g":
+                    decay_type = "γ"
+                
+                # Highlight current isotope (most recent decay)
+                is_current = (i == len(display_chain) - 1)
+                color = (255, 255, 100) if is_current else (200, 200, 200)
+                
+                # Step number
+                step_num = f"{scroll_start+i+1}. "
+                self.screen.blit(self.get_text(f"decay_num_{scroll_start+i}", 
+                                             step_num, color), (x, y))
+                
+                # Format the decay
+                decay_text = f"{orig_element}-{orig_mass} → {new_element}-{new_mass} ({decay_type})"
+                self.screen.blit(self.get_text(f"decay_step_{scroll_start+i}", 
+                                             decay_text, color), (x + 25, y))
+                y += line_height
+                
+                # Show decay time on next line with indent
+                if decay_time == 0:
+                    time_text = "[initial]" if i == 0 else "[<1 fs]"
+                else:
+                    time_text = self.format_time_value_with_unit(decay_time)
+                    
+                time_label = f"   Time: {time_text}"
+                self.screen.blit(self.get_text(f"decay_time_{scroll_start+i}", 
+                                            time_label, (180, 180, 200)), (x + 10, y))
+                y += line_height
+                
+                # Add a small gap between entries
+                y += 5
+                
+            except Exception as e:
+                # Show error if something goes wrong
+                error_text = f"Error: {str(e)[:20]}"
+                self.screen.blit(self.get_text(f"decay_error_{i}", error_text, 
+                                            (255, 100, 100)), (x, y))
+                y += line_height
+    
+    def handle_scroll(self, amount, section=None):
+        """Handle scrolling for different panel sections"""
+        if section == "decay_chain":
+            # Scroll the decay chain specifically
+            new_scroll = self.decay_chain_scroll + amount
+            # Ensure scroll doesn't go negative
+            self.decay_chain_scroll = max(0, new_scroll)
+            # Upper limit will be applied in draw_decay_chain based on content
+        else:
+            # Scroll the main info panel
+            self.info_panel_scroll = max(0, self.info_panel_scroll + amount)
+            
     def format_time_scale(self, time_scale):
         """Format time scale with clear, human-readable units"""
         if time_scale == 1.0:
@@ -503,8 +528,9 @@ class Renderer:
     def handle_scroll(self, amount, section=None):
         """Handle scrolling for different panel sections"""
         if section == "decay_chain":
+            # Scroll the decay chain specifically
             self.decay_chain_scroll = max(0, min(self.max_decay_scroll, 
                                                 self.decay_chain_scroll + amount))
         else:
-            # Default info panel scrolling
+            # Scroll the main info panel
             self.info_panel_scroll = max(0, self.info_panel_scroll + amount)

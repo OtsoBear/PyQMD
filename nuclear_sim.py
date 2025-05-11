@@ -59,10 +59,10 @@ class NuclearSimulation:
         self.physics_dt = 1.0 / 240.0
         self.fps_history = deque(maxlen=30)
         self.manual_accuracy = True
-        self.accuracy = 0.8
+        self.accuracy = 1
         self.max_substeps = 20
         self.substeps_used = 0
-        self.auto_adjust_substeps = True  # Auto-adjust substeps based on time scale
+        self.auto_adjust_substeps = False  # Auto-adjust substeps based on time scale
         self.physics_dt_factor = 0.8  # Used to scale physics timestep
         
         self.camera_pos = [400, 400]
@@ -179,18 +179,25 @@ class NuclearSimulation:
         """Update particle positions and ages with complete time-scale independence"""
         
         # For decay particles, use a completely fixed animation speed
-        # This ensures they always move at the same visual speed regardless of time scale
         if particle.type in [ParticleType.ALPHA, ParticleType.ELECTRON, 
                            ParticleType.GAMMA, ParticleType.POSITRON]:
             # Use a completely fixed dt for visual consistency
-            ANIMATION_DT = 1.0/60.0  # Fixed 60fps-equivalent for smooth animation
+            ANIMATION_DT = 1.0/240.0  # Base animation timestep
             
-            # Update position with fixed speed
-            particle.x += particle.vx * ANIMATION_DT
-            particle.y += particle.vy * ANIMATION_DT
+            # Scale the speed inversely with substep count to maintain visual consistency
+            # More substeps = slower movement per frame to keep overall speed consistent
+            substep_factor = 10.0 / max(1.0, self.substeps_used)
+            SPEED_SCALE = 0.3 * substep_factor
             
-            # Age still uses the simulation time step to ensure proper lifetime
-            particle.age += age_dt
+            # Update position with adjusted speed
+            particle.x += particle.vx * ANIMATION_DT * SPEED_SCALE
+            particle.y += particle.vy * ANIMATION_DT * SPEED_SCALE
+            
+            # Age particles more slowly when many substeps are used
+            # This ensures particles remain visible for similar durations regardless of substep count
+            aging_scale = min(1.0, 1.0 / (math.sqrt(max(1.0, self.time_scale / 100.0)) * 
+                                         math.sqrt(max(1.0, self.substeps_used / 10.0))))
+            particle.age += age_dt * aging_scale
             
             # Check if particle should be removed
             return particle.age < particle.lifetime
@@ -286,25 +293,58 @@ class NuclearSimulation:
             # Create decay products with consistent visualization
             decay_products = products(self.nucleus.x, self.nucleus.y)
             for product in decay_products:
-                # Define fixed base speeds for different particle types for visual consistency
+                # Define fixed base speeds for different particle types
                 if product.type == ParticleType.ALPHA:
-                    base_speed = 80.0  # Alpha particles are relatively slow
+                    base_speed = 30.0
                 elif product.type == ParticleType.GAMMA:
-                    base_speed = 180.0  # Gamma rays are very fast
+                    base_speed = 60.0
                 elif product.type in [ParticleType.ELECTRON, ParticleType.POSITRON]:
-                    base_speed = 150.0  # Beta particles are quite fast
+                    base_speed = 50.0
                 else:
-                    base_speed = 100.0  # Default for other particles
+                    base_speed = 40.0
                     
                 # Normalize the velocity vector but keep the direction
                 velocity_mag = math.sqrt(product.vx**2 + product.vy**2)
                 if velocity_mag > 0.001:
                     # Normalize and scale by the base speed for the particle type
+                    # Scale speed proportionally with substep count to maintain visual consistency
+                    substep_multiplier = max(1.0, self.substeps_used / 10.0)
                     product.vx = (product.vx / velocity_mag) * base_speed
                     product.vy = (product.vy / velocity_mag) * base_speed
                 
-                # Set a minimum lifetime for visibility regardless of time scale
-                product.lifetime = max(0.5, product.lifetime)
+                # Scale the base lifetime based on substep count
+                base_lifetime = 5.0  # Base lifetime in seconds
+                
+                # Adjust lifetime based on time scale, physics parameters, and substeps
+                if self.time_scale > 1.0:
+                    # Scale lifetime linearly with time scale
+                    time_scale_factor = max(1.0, self.time_scale / 100.0)
+                    
+                    # Make lifetime proportional to substep count - more substeps = longer lifetime
+                    substep_factor = max(1.0, math.sqrt(self.substeps_used))
+                    
+                    # Physics dt adjustment - smaller dt means more steps per second
+                    dt_factor = max(1.0, 0.016 / self.physics_dt)
+                    
+                    # Combine all factors with appropriate scaling
+                    combined_factor = time_scale_factor * substep_factor * dt_factor
+                    
+                    # Apply a significant boost with reasonable limits
+                    min_lifetime = base_lifetime * substep_factor
+                    max_lifetime = 12000.0  # Cap at 2 minutes to avoid excessive particles
+                    product.lifetime = max(min_lifetime, base_lifetime * combined_factor)
+                    
+                    # For very high substep counts, increase lifetime even more to compensate
+                    if self.substeps_used > 15:
+                        product.lifetime *= (self.substeps_used / 15.0)
+                else:
+                    # For slow-motion, scale lifetime with substep count
+                    product.lifetime = max(product.lifetime, base_lifetime * max(1.0, self.substeps_used / 5.0))
+                
+                # Log lifetime and substeps occasionally for debugging
+                if random.random() < 0.05:  # 5% chance to log
+                    substep_info = f", substeps: {self.substeps_used}"
+                    logger.info(f"Particle {product.type.name} lifetime: {product.lifetime:.2f}s{substep_info}")
             
             self.particles.extend(decay_products)
             self.decay_times.append(self.time_passed)
@@ -348,22 +388,19 @@ class NuclearSimulation:
                 # Handle window resize event
                 self.handle_resize(event.size)
             elif event.type == pygame.MOUSEWHEEL:
-                # Check if mouse is over info panel for scrolling
+                # Check if mouse is over info panel or decay chain panel for scrolling
                 mouse_x, mouse_y = pygame.mouse.get_pos()
-                if mouse_x > self.renderer.simulation_width:
-                    # Mouse is over info panel
-                    
-                    # Calculate position for decay chain section (approximate)
-                    # This is a rough estimate; you may need to adjust based on your layout
-                    info_panel_height = self.renderer.height
-                    decay_chain_start = 250  # Approximate Y position where decay chain starts
-                    
-                    if mouse_y > decay_chain_start and hasattr(self.nucleus, 'decay_chain') and len(self.nucleus.decay_chain) > 1:
-                        # Mouse is over decay chain section
-                        self.renderer.handle_scroll(-event.y * 1, section="decay_chain")
-                    else:
-                        # Mouse is over other parts of info panel
-                        self.renderer.handle_scroll(-event.y * 30)
+                
+                # Decay chain is on the right side of the screen
+                decay_chain_x = self.renderer.width - 320  # Right panel position
+                
+                if mouse_x >= decay_chain_x:
+                    # Mouse is over the decay chain panel on the right
+                    self.renderer.handle_scroll(-event.y * 3, section="decay_chain")
+                    logger.debug(f"Scrolling decay chain by {-event.y * 3}, current: {self.renderer.decay_chain_scroll}")
+                elif mouse_x > self.renderer.simulation_width:
+                    # Mouse is over the main info panel
+                    self.renderer.handle_scroll(-event.y * 30)
                 else:
                     # Mouse over simulation - handle zooming
                     if event.y > 0:
@@ -385,6 +422,10 @@ class NuclearSimulation:
         self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
         # Inform renderer of new window size
         self.renderer.resize(width, height)
+        
+        # Reset decay chain scroll when window is resized to avoid UI issues
+        if hasattr(self.renderer, 'decay_chain_scroll'):
+            self.renderer.decay_chain_scroll = 0
     
     def handle_keypress(self, key):
         if key == pygame.K_ESCAPE:
