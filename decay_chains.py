@@ -333,7 +333,7 @@ def create_alpha(x, y):
     speed = 100
     vx = speed * math.cos(angle)
     vy = speed * math.sin(angle)
-    return [Particle(x, y, ParticleType.ALPHA, int(vx), int(vy))]
+    return [Particle(x, y, ParticleType.ALPHA, vx, vy)]
 
 def create_beta_minus(x, y):
     angle = random.uniform(0, 2 * math.pi)
