@@ -31,7 +31,6 @@ except ImportError:
 class NuclearSimulation:
     def __init__(self):
         pygame.init()
-        # Make the window resizable
         self.screen = pygame.display.set_mode((1200, 800), pygame.RESIZABLE)
         pygame.display.set_caption("Nuclear Physics Simulation")
         self.clock = pygame.time.Clock()
@@ -48,43 +47,35 @@ class NuclearSimulation:
         self.nucleus = None
         self.particles = []
         self.time_scale = 1.0
-        # Dramatically increase max time scale capability
         self.min_time_scale = 1e-40
-        self.max_time_scale = 1e30  # Allow ridiculous time scales (billions of years per second)
+        self.max_time_scale = 1e30
         self.time_passed = 0
         
         self.decay_counts = {decay_type.name: 0 for decay_type in DecayType if decay_type != DecayType.NONE}
         self.decay_times = deque(maxlen=100)
         
-        self.physics_dt = 1.0 / 240.0
+        # Increased default dt for better performance
+        self.physics_dt = 1.0 / 120.0
         self.fps_history = deque(maxlen=30)
         self.manual_accuracy = True
         self.accuracy = 1
         self.max_substeps = 20
         self.substeps_used = 0
-        self.auto_adjust_substeps = False  # Auto-adjust substeps based on time scale
-        self.physics_dt_factor = 0.8  # Used to scale physics timestep
+        self.auto_adjust_substeps = False
+        self.physics_dt_factor = 0.8
         
         self.camera_pos = [400, 400]
         self.camera_target = [400, 400]
-        # Fix zoom management
         self.zoom_level = 15.0
         self.target_zoom = 15.0
-        self.zoom_speed = 0.1
+        self.zoom_speed = 0.12  # Slightly faster for smoother experience
         self.min_zoom = 0.1
         self.max_zoom = 100.0
         
-        # Add more extreme time presets for large scale simulations
-        self.time_scale_presets = {
-            'real': 1.0,                  # Real-time
-            'minute': 60.0,               # 1 minute per second
-            'hour': 3600.0,               # 1 hour per second
-            'day': 86400.0,               # 1 day per second
-            'year': 31557600.0,           # 1 year per second
-            'millennium': 31557600000.0,  # 1000 years per second
-            'million': 31557600000000.0,  # 1 million years per second
-            'billion': 31557600000000000.0, # 1 billion years per second
-        }
+        # Input mode for custom nucleus creation
+        self.input_mode = False
+        self.input_values = [92, 146]  # Default U-238
+        self.input_cursor = 0  # 0 for protons, 1 for neutrons
         
         # Start with U-238, which is unstable
         self.create_nucleus(92, 146)
@@ -97,22 +88,11 @@ class NuclearSimulation:
         self.decay_times = deque(maxlen=100)
         self.camera_target = [self.nucleus.x, self.nucleus.y]
         
-        # Initialize decay chain with just the initial state, without creating a fake decay
         self.nucleus.decay_chain = []
-        
-        # Add initial isotope to decay chain (store just one element for initial state)
         element = self.get_element_symbol(protons)
         mass = protons + neutrons
-        
-        # Using a single tuple with just element and mass for initial state
-        # We'll be checking for this special format to display differently
-        # Add 0 for decay time since it's the initial state
         self.nucleus.decay_chain.append((element, mass, "-", element, mass, 0))
-        
-        # Set the last real decay time to current time (0 at start)
         self.nucleus.last_decay_time = self.time_passed
-        
-        # Ensure stability (half-life) is set properly
         self.nucleus.stability = get_half_life(protons, neutrons)
         
     def update_simulation(self, dt):
@@ -127,41 +107,31 @@ class NuclearSimulation:
         self.camera_pos[1] += (self.camera_target[1] - self.camera_pos[1]) * 0.1
         self.zoom_level += (self.target_zoom - self.zoom_level) * self.zoom_speed
         
-        # Auto-adjust physics parameters based on time scale if enabled
         if self.auto_adjust_substeps and self.time_scale != 1.0:
-            # Scale physics timestep inversely with time scale
             if self.time_scale > 1.0:
-                # For faster simulation, increase timestep to reduce substeps
                 physics_dt_scale = min(10.0, self.time_scale ** 0.3)
                 adjusted_dt = self.physics_dt_factor * physics_dt_scale / 240.0
-                self.physics_dt = min(1.0/60.0, adjusted_dt)  # Cap at 60 Hz
+                self.physics_dt = min(1.0/60.0, adjusted_dt)
             else:
-                # For slower simulation, decrease timestep for precision
                 physics_dt_scale = max(0.1, self.time_scale ** 0.2)
                 adjusted_dt = self.physics_dt_factor * physics_dt_scale / 240.0
-                self.physics_dt = max(1.0/1000.0, adjusted_dt)  # Cap at 1000 Hz
+                self.physics_dt = max(1.0/1000.0, adjusted_dt)
         
-        # Calculate desired physics timestep with accuracy factor
         effective_physics_dt = self.physics_dt * (2.0 - self.accuracy)
         
-        # Calculate number of physics steps needed
-        # If we're simulating very quickly, increase substeps to ensure accuracy
         time_scale_factor = 1.0 if self.time_scale <= 10.0 else math.log10(self.time_scale)
         adjusted_max_substeps = int(self.max_substeps * time_scale_factor) if self.auto_adjust_substeps else self.max_substeps
         
-        # Calculate substeps needed
         num_steps = max(1, min(adjusted_max_substeps, int(desired_dt / effective_physics_dt)))
         self.substeps_used = num_steps
         
-        # If we're hitting the max substeps limit consistently, log a warning
         if num_steps >= adjusted_max_substeps and adjusted_max_substeps > 0:
-            if random.random() < 0.01:  # Only log occasionally to avoid spam
+            if random.random() < 0.01:
                 logger.warning(f"Max substeps limit reached ({num_steps}/{adjusted_max_substeps}). Consider adjusting physics parameters.")
         
         for _ in range(num_steps):
             self.particles = [p for p in self.particles if self.update_particle(p, effective_physics_dt, desired_dt/num_steps)]
             
-            # Fixed decay probability calculation
             step_time = desired_dt / num_steps
             if self.nucleus and self.nucleus.should_decay(step_time):
                 self.handle_decay()
@@ -176,88 +146,59 @@ class NuclearSimulation:
             self.resolve_overlaps()
     
     def update_particle(self, particle, dt, age_dt):
-        """Update particle positions and ages with complete time-scale independence"""
-        
-        # For decay particles, use a completely fixed animation speed
         if particle.type in [ParticleType.ALPHA, ParticleType.ELECTRON, 
                            ParticleType.GAMMA, ParticleType.POSITRON]:
-            # Use a completely fixed dt for visual consistency
-            ANIMATION_DT = 1.0/240.0  # Base animation timestep
+            ANIMATION_DT = 1.0/240.0
             
-            # Scale the speed inversely with substep count to maintain visual consistency
-            # More substeps = slower movement per frame to keep overall speed consistent
             substep_factor = 10.0 / max(1.0, self.substeps_used)
             SPEED_SCALE = 0.3 * substep_factor
             
-            # Update position with adjusted speed
             particle.x += particle.vx * ANIMATION_DT * SPEED_SCALE
             particle.y += particle.vy * ANIMATION_DT * SPEED_SCALE
             
-            # Age particles more slowly when many substeps are used
-            # This ensures particles remain visible for similar durations regardless of substep count
             aging_scale = min(1.0, 1.0 / (math.sqrt(max(1.0, self.time_scale / 100.0)) * 
                                          math.sqrt(max(1.0, self.substeps_used / 10.0))))
             particle.age += age_dt * aging_scale
             
-            # Check if particle should be removed
             return particle.age < particle.lifetime
         else:
-            # For nucleus particles, use time-scaled dt
             effective_dt = dt * (self.time_scale ** 0.5)
             particle.x += particle.vx * effective_dt
             particle.y += particle.vy * effective_dt
             particle.age += age_dt
-            return True  # Nucleus particles don't expire
+            return True
     
     def handle_decay(self):
         p, n, decay_type, products = get_decay_product(self.nucleus.protons, self.nucleus.neutrons)
         
         if decay_type:
-            # Get element symbols for decay chain tracking
             old_z, old_n = self.nucleus.protons, self.nucleus.neutrons
             old_element = self.get_element_symbol(old_z)
             new_element = self.get_element_symbol(p)
             old_mass = old_z + old_n
             new_mass = p + n
             
-            # Initialize decay_chain if it doesn't exist
             if not hasattr(self.nucleus, 'decay_chain'):
                 self.nucleus.decay_chain = []
                 self.nucleus.last_decay_time = self.time_passed
             
-            # Get a realistic decay time based on the isotope's half-life
-            # instead of just using the simulation time difference
             current_time = self.time_passed
             last_time = getattr(self.nucleus, 'last_decay_time', current_time)
             
-            # Calculate a realistic decay time based on half-life
-            # Use the actual half-life of the decaying isotope
             half_life = self.nucleus.stability
-            
-            # If zero time has passed or half-life is extremely small,
-            # generate a realistic time based on the half-life
             measured_time = current_time - last_time
             
-            # For zero or near-zero measured times, use a statistical approach
             if measured_time < 0.001 or half_life < 0.001:
-                # Use a random fraction of the half-life for a more realistic distribution
-                # This follows the exponential decay probability distribution
                 if half_life == float('inf'):
-                    # For stable isotopes (shouldn't happen in normal decays)
                     decay_duration = 0
                 else:
-                    # For unstable isotopes, use a realistic statistical model
-                    # based on the exponential decay formula
-                    random_factor = -math.log(random.random())  # Exponential distribution
+                    random_factor = -math.log(random.random())
                     decay_duration = min(half_life * random_factor / 0.693, measured_time or half_life)
             else:
-                # Use the actual measured time if it's significant
                 decay_duration = measured_time
                 
-            # Record the actual decay step with the realistic time
             decay_type_symbol = self.get_decay_symbol(decay_type)
             
-            # Ensure decay type symbol is a valid Unicode character
             if decay_type == DecayType.ALPHA:
                 decay_type_symbol = "α"
             elif decay_type == DecayType.BETA_MINUS:
@@ -267,33 +208,27 @@ class NuclearSimulation:
             elif decay_type == DecayType.GAMMA:
                 decay_type_symbol = "γ"
             
-            # Add decay to chain with the realistic decay time
             self.nucleus.decay_chain.append((
                 str(old_element), 
                 int(old_mass), 
                 str(decay_type_symbol), 
                 str(new_element), 
                 int(new_mass),
-                decay_duration  # Use the realistic decay time
+                decay_duration
             ))
             
-            # Update last decay time
             self.nucleus.last_decay_time = current_time
             
-            # Format decay time for logging with appropriate units
             time_str = self.format_time_value_with_unit(decay_duration)
             logger.info(f"DECAY: {old_element}-{old_mass} → {new_element}-{new_mass} ({decay_type_symbol}) after {time_str}")
             
-            # Update nucleus properties with new values
             self.nucleus.protons = p
             self.nucleus.neutrons = n
             self.nucleus.adjust_particles(decay_type)
             self.nucleus.update_center_of_mass()
             
-            # Create decay products with consistent visualization
             decay_products = products(self.nucleus.x, self.nucleus.y)
             for product in decay_products:
-                # Define fixed base speeds for different particle types
                 if product.type == ParticleType.ALPHA:
                     base_speed = 30.0
                 elif product.type == ParticleType.GAMMA:
@@ -303,58 +238,40 @@ class NuclearSimulation:
                 else:
                     base_speed = 40.0
                     
-                # Normalize the velocity vector but keep the direction
                 velocity_mag = math.sqrt(product.vx**2 + product.vy**2)
                 if velocity_mag > 0.001:
-                    # Normalize and scale by the base speed for the particle type
-                    # Scale speed proportionally with substep count to maintain visual consistency
                     substep_multiplier = max(1.0, self.substeps_used / 10.0)
                     product.vx = (product.vx / velocity_mag) * base_speed
                     product.vy = (product.vy / velocity_mag) * base_speed
                 
-                # Scale the base lifetime based on substep count
-                base_lifetime = 5.0  # Base lifetime in seconds
+                base_lifetime = 5.0
                 
-                # Adjust lifetime based on time scale, physics parameters, and substeps
                 if self.time_scale > 1.0:
-                    # Scale lifetime linearly with time scale
                     time_scale_factor = max(1.0, self.time_scale / 100.0)
-                    
-                    # Make lifetime proportional to substep count - more substeps = longer lifetime
                     substep_factor = max(1.0, math.sqrt(self.substeps_used))
-                    
-                    # Physics dt adjustment - smaller dt means more steps per second
                     dt_factor = max(1.0, 0.016 / self.physics_dt)
-                    
-                    # Combine all factors with appropriate scaling
                     combined_factor = time_scale_factor * substep_factor * dt_factor
-                    
-                    # Apply a significant boost with reasonable limits
                     min_lifetime = base_lifetime * substep_factor
-                    max_lifetime = 12000.0  # Cap at 2 minutes to avoid excessive particles
+                    max_lifetime = 12000.0
                     product.lifetime = max(min_lifetime, base_lifetime * combined_factor)
                     
-                    # For very high substep counts, increase lifetime even more to compensate
                     if self.substeps_used > 15:
                         product.lifetime *= (self.substeps_used / 15.0)
                 else:
-                    # For slow-motion, scale lifetime with substep count
                     product.lifetime = max(product.lifetime, base_lifetime * max(1.0, self.substeps_used / 5.0))
                 
-                # Log lifetime and substeps occasionally for debugging
-                if random.random() < 0.05:  # 5% chance to log
+                if random.random() < 0.05:
                     substep_info = f", substeps: {self.substeps_used}"
                     logger.info(f"Particle {product.type.name} lifetime: {product.lifetime:.2f}s{substep_info}")
             
             self.particles.extend(decay_products)
             self.decay_times.append(self.time_passed)
             
-            # Set the new nucleus stability
             self.nucleus.stability = get_half_life(self.nucleus.protons, self.nucleus.neutrons)
     
     def resolve_overlaps(self):
         particles = self.nucleus.particles
-        min_dist = 5.0  # 2 * radius
+        min_dist = 5.0
         
         for i in range(len(particles)):
             for j in range(i+1, len(particles)):
@@ -383,114 +300,146 @@ class NuclearSimulation:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
-                self.handle_keypress(event.key)
+                if self.input_mode:
+                    self.handle_input_keypress(event)
+                else:
+                    self.handle_keypress(event.key)
             elif event.type == pygame.VIDEORESIZE:
-                # Handle window resize event
                 self.handle_resize(event.size)
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                # Handle section toggle clicks
+                if event.button == 1:  # Left mouse button
+                    if hasattr(self.renderer, 'handle_mouse_click'):
+                        self.renderer.handle_mouse_click()
             elif event.type == pygame.MOUSEWHEEL:
-                # Check if mouse is over info panel or decay chain panel for scrolling
                 mouse_x, mouse_y = pygame.mouse.get_pos()
                 
-                # Decay chain is on the right side of the screen
-                decay_chain_x = self.renderer.width - 320  # Right panel position
+                decay_chain_x = self.renderer.width - 320
                 
                 if mouse_x >= decay_chain_x:
-                    # Mouse is over the decay chain panel on the right
                     self.renderer.handle_scroll(-event.y * 3, section="decay_chain")
-                    logger.debug(f"Scrolling decay chain by {-event.y * 3}, current: {self.renderer.decay_chain_scroll}")
                 elif mouse_x > self.renderer.simulation_width:
-                    # Mouse is over the main info panel
                     self.renderer.handle_scroll(-event.y * 30)
                 else:
-                    # Mouse over simulation - handle zooming
                     if event.y > 0:
                         self.target_zoom *= 1.2
                     elif event.y < 0:
                         self.target_zoom /= 1.2
                     self.target_zoom = max(self.min_zoom, min(self.max_zoom, self.target_zoom))
         
-        keys = pygame.key.get_pressed()
-        move_speed = 5.0 / self.zoom_level
-        if keys[pygame.K_w]: self.camera_target[1] -= move_speed
-        if keys[pygame.K_s]: self.camera_target[1] += move_speed
-        if keys[pygame.K_a]: self.camera_target[0] -= move_speed
-        if keys[pygame.K_d]: self.camera_target[0] += move_speed
+        if not self.input_mode:
+            keys = pygame.key.get_pressed()
+            move_speed = 5.0 / self.zoom_level
+            if keys[pygame.K_w]: self.camera_target[1] -= move_speed
+            if keys[pygame.K_s]: self.camera_target[1] += move_speed
+            if keys[pygame.K_a]: self.camera_target[0] -= move_speed
+            if keys[pygame.K_d]: self.camera_target[0] += move_speed
     
     def handle_resize(self, size):
-        """Handle window resize event"""
         width, height = size
         self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
-        # Inform renderer of new window size
         self.renderer.resize(width, height)
         
-        # Reset decay chain scroll when window is resized to avoid UI issues
         if hasattr(self.renderer, 'decay_chain_scroll'):
             self.renderer.decay_chain_scroll = 0
     
+    def handle_input_keypress(self, event):
+        if event.key == pygame.K_ESCAPE:
+            self.input_mode = False
+            return
+        
+        if event.key == pygame.K_RETURN:
+            try:
+                p, n = self.input_values
+                if 0 < p <= 118 and n > 0:
+                    self.create_nucleus(p, n)
+                    self.input_mode = False
+                else:
+                    logger.warning("Invalid nucleus parameters")
+            except Exception as e:
+                logger.error(f"Error creating nucleus: {e}")
+            return
+            
+        if event.key == pygame.K_TAB:
+            self.input_cursor = (self.input_cursor + 1) % 2
+            return
+            
+        if event.key == pygame.K_BACKSPACE:
+            value = self.input_values[self.input_cursor]
+            self.input_values[self.input_cursor] = value // 10
+            return
+            
+        if event.unicode.isdigit():
+            digit = int(event.unicode)
+            current = self.input_values[self.input_cursor]
+            new_val = current * 10 + digit
+            if (self.input_cursor == 0 and new_val <= 118) or new_val <= 200:
+                self.input_values[self.input_cursor] = new_val
+
     def handle_keypress(self, key):
         if key == pygame.K_ESCAPE:
             self.running = False
         elif key == pygame.K_SPACE and self.nucleus:
             self.handle_decay()
             
-        # Time scale controls with more options
+        # Time scale controls
         elif key == pygame.K_UP:
             self.time_scale = min(self.time_scale * 10.0, self.max_time_scale)
             logger.info(f"Time scale: {self.time_scale}")
         elif key == pygame.K_DOWN:
             self.time_scale = max(self.time_scale / 10.0, self.min_time_scale)
             logger.info(f"Time scale: {self.time_scale}")
-        elif key == pygame.K_RIGHT:
+        elif key == pygame.K_i:
             self.time_scale = min(self.time_scale * 2.0, self.max_time_scale)
             logger.info(f"Time scale: {self.time_scale}")
-        elif key == pygame.K_LEFT:
+        elif key == pygame.K_k:
             self.time_scale = max(self.time_scale / 2.0, self.min_time_scale)
             logger.info(f"Time scale: {self.time_scale}")
-        elif key == pygame.K_0:
-            self.time_scale = 1.0  # Real-time
+        elif key == pygame.K_o:
+            self.time_scale = 1.0
             logger.info("Time scale: real-time")
             
-        # Enhance time scale presets
-        elif key == pygame.K_r:  # Real-time
-            self.time_scale = self.time_scale_presets['real']
-            logger.info("Time scale: real-time")
-        elif key == pygame.K_t:  # Time compression - minute per second
-            self.time_scale = self.time_scale_presets['minute']
-            logger.info("Time scale: 1 minute per second")
-        elif key == pygame.K_h:  # Hour per second
-            self.time_scale = self.time_scale_presets['hour']
-            logger.info("Time scale: 1 hour per second")
-        elif key == pygame.K_j:  # Day per second (don't bind to D which is used for camera)
-            self.time_scale = self.time_scale_presets['day']
-            logger.info("Time scale: 1 day per second")
-        elif key == pygame.K_y:  # Year per second
-            self.time_scale = self.time_scale_presets['year']
-            logger.info("Time scale: 1 year per second")
-        elif key == pygame.K_m:  # Millennium per second
-            self.time_scale = self.time_scale_presets['millennium']
-            logger.info("Time scale: 1000 years per second")
-        elif key == pygame.K_b:  # Billion years per second
-            self.time_scale = self.time_scale_presets['billion']
-            logger.info("Time scale: 1 billion years per second")
+        # Physics simulation controls
+        elif key == pygame.K_p:
+            self.max_substeps = min(100, self.max_substeps + 5)
+            logger.info(f"Max substeps: {self.max_substeps}")
+        elif key == pygame.K_l:
+            self.max_substeps = max(1, self.max_substeps - 5)
+            logger.info(f"Max substeps: {self.max_substeps}")
+        elif key == pygame.K_x:
+            self.physics_dt *= 1.1
+            logger.info(f"Physics dt: {self.physics_dt}")
+        elif key == pygame.K_z:
+            self.physics_dt /= 1.1
+            logger.info(f"Physics dt: {self.physics_dt}")
             
-        # Fix zoom controls
+        # Zoom controls
         elif key == pygame.K_q:
             self.target_zoom = min(self.max_zoom, self.target_zoom * 1.5)
-            logger.info(f"Zooming in: {self.target_zoom:.1f}x")
         elif key == pygame.K_e:
             self.target_zoom = max(self.min_zoom, self.target_zoom / 1.5)
-            logger.info(f"Zooming out: {self.target_zoom:.1f}x")
-        elif key == pygame.K_z:  # Reset zoom
+        elif key == pygame.K_r:
             self.target_zoom = 15.0
-            logger.info("Zoom reset to default")
             
-        elif key == pygame.K_f:  # Changed from A to F
-            # Toggle automatic substep adjustment
+        # Adjust grid scale
+        elif key == pygame.K_g:
+            # Increase grid size (in femtometers)
+            self.renderer.fm_per_grid *= 2.0
+            if self.renderer.fm_per_grid > 32.0:
+                self.renderer.fm_per_grid = 1.0
+            logger.info(f"Grid scale: {self.renderer.fm_per_grid} femtometers")
+            
+        elif key == pygame.K_f:
             self.auto_adjust_substeps = not self.auto_adjust_substeps
             logger.info(f"Auto-adjust substeps: {'ON' if self.auto_adjust_substeps else 'OFF'}")
             
+        # Tab navigation
+        elif key == pygame.K_TAB:
+            # Cycle through info panel tabs
+            self.renderer.active_section = (self.renderer.active_section + 1) % self.renderer.total_sections
+            
+        # Isotope selection
         elif key >= pygame.K_1 and key <= pygame.K_9:
-            # Replace with unstable isotopes
             isotopes = {
                 pygame.K_1: (1, 2),     # H-3 (tritium) - unstable
                 pygame.K_2: (2, 3),     # He-5 - unstable with short half-life
@@ -505,24 +454,32 @@ class NuclearSimulation:
             if key in isotopes:
                 self.create_nucleus(*isotopes[key])
                 
-        # Add key to reset decay chain scroll
+        # Custom nucleus input
+        elif key == pygame.K_n:
+            self.input_mode = True
+            self.input_values = [0, 0]
+            self.input_cursor = 0
+                
+        # Decay chain navigation
+        elif key == pygame.K_v:
+            if hasattr(self.renderer, 'decay_chain_scroll'):
+                self.renderer.handle_scroll(-1, section="decay_chain")
+        elif key == pygame.K_b:
+            if hasattr(self.renderer, 'decay_chain_scroll'):
+                self.renderer.handle_scroll(1, section="decay_chain")
         elif key == pygame.K_c:
             if hasattr(self.renderer, 'decay_chain_scroll'):
                 self.renderer.decay_chain_scroll = 0
-                logger.info("Decay chain scroll reset to top")
-                
-        # Add keys for scrolling the decay chain
-        elif key == pygame.K_PAGEUP:
-            if hasattr(self.renderer, 'decay_chain_scroll'):
-                self.renderer.handle_scroll(-5, section="decay_chain")
-                logger.info("Scrolling decay chain up")
-        elif key == pygame.K_PAGEDOWN:
-            if hasattr(self.renderer, 'decay_chain_scroll'):
-                self.renderer.handle_scroll(5, section="decay_chain")
-                logger.info("Scrolling decay chain down")
 
+        # Add a key to toggle all section visibility
+        elif key == pygame.K_h:
+            # Toggle visibility of all sections at once
+            all_visible = all(self.renderer.section_visible.values())
+            for section in self.renderer.section_visible:
+                self.renderer.section_visible[section] = not all_visible
+            logger.info(f"{'Hidden' if all_visible else 'Showing'} all info sections")
+                
     def get_element_symbol(self, atomic_number):
-        """Get the element symbol for an atomic number"""
         elements = {
             1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O",
             9: "F", 10: "Ne", 11: "Na", 12: "Mg", 13: "Al", 14: "Si", 15: "P",
@@ -546,7 +503,6 @@ class NuclearSimulation:
         return elements.get(atomic_number, f"E{atomic_number}")
     
     def get_decay_symbol(self, decay_type):
-        """Get a symbol for the decay type"""
         symbols = {
             DecayType.ALPHA: "α",
             DecayType.BETA_MINUS: "β-",
@@ -559,39 +515,39 @@ class NuclearSimulation:
         return symbols.get(decay_type, "?")
     
     def format_time_value_with_unit(self, seconds):
-        """Format a time value with appropriate units based on scale"""
         abs_seconds = abs(seconds)
         if abs_seconds == 0:
             return "0 s"
         elif abs_seconds < 1e-15:
-            return f"{seconds * 1e18:.2f} as"  # attoseconds
+            return f"{seconds * 1e18:.2f} as"
         elif abs_seconds < 1e-12:
-            return f"{seconds * 1e15:.2f} fs"  # femtoseconds
+            return f"{seconds * 1e15:.2f} fs"
         elif abs_seconds < 1e-9:
-            return f"{seconds * 1e12:.2f} ps"  # picoseconds
+            return f"{seconds * 1e12:.2f} ps"
         elif abs_seconds < 1e-6:
-            return f"{seconds * 1e9:.2f} ns"   # nanoseconds
+            return f"{seconds * 1e9:.2f} ns"
         elif abs_seconds < 1e-3:
-            return f"{seconds * 1e6:.2f} μs"   # microseconds
+            return f"{seconds * 1e6:.2f} μs"
         elif abs_seconds < 1:
-            return f"{seconds * 1e3:.2f} ms"   # milliseconds
+            return f"{seconds * 1e3:.2f} ms"
         elif abs_seconds < 60:
-            return f"{seconds:.2f} s"          # seconds
+            return f"{seconds:.2f} s"
         elif abs_seconds < 3600:
-            return f"{seconds / 60:.2f} min"   # minutes
+            return f"{seconds / 60:.2f} min"
         elif abs_seconds < 86400:
-            return f"{seconds / 3600:.2f} h"   # hours
+            return f"{seconds / 3600:.2f} h"
         elif abs_seconds < 31557600:
-            return f"{seconds / 86400:.2f} days"  # days
+            return f"{seconds / 86400:.2f} days"
         else:
-            return f"{seconds / 31557600:.2f} years"  # years
+            return f"{seconds / 31557600:.2f} years"
     
     def run(self):
         logger.info("Starting simulation")
         last_time = time.time()
         try:
             while self.running:
-                dt = min(self.clock.tick(60) / 1000.0, 0.1)
+                dt = self.clock.tick(60) / 1000.0
+
                 
                 self.handle_events()
                 self.update_simulation(dt)
@@ -600,7 +556,8 @@ class NuclearSimulation:
                                     self.time_scale, self.accuracy, 
                                     self.physics_dt, self.substeps_used,
                                     self.max_substeps, self.gpu_available,
-                                    self.decay_counts, self.time_passed)
+                                    self.decay_counts, self.time_passed,
+                                    self.input_mode, self.input_values, self.input_cursor)
                 
                 time.sleep(max(0, (1.0/60.0) - (time.time() - last_time)))
                 last_time = time.time()
