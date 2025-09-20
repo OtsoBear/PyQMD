@@ -340,35 +340,35 @@ def create_beta_minus(x, y):
     speed = 150
     vx = speed * math.cos(angle)
     vy = speed * math.sin(angle)
-    return [Particle(x, y, ParticleType.ELECTRON, vx, vy)]
+    return [Particle(x, y, ParticleType.ELECTRON, int(vx), int(vy))]
 
 def create_beta_plus(x, y):
     angle = random.uniform(0, 2 * math.pi)
     speed = 150
     vx = speed * math.cos(angle)
     vy = speed * math.sin(angle)
-    return [Particle(x, y, ParticleType.POSITRON, vx, vy)]
+    return [Particle(x, y, ParticleType.POSITRON, int(vx), int(vy))]
 
 def create_gamma(x, y):
     angle = random.uniform(0, 2 * math.pi)
     speed = 200
     vx = speed * math.cos(angle)
     vy = speed * math.sin(angle)
-    return [Particle(x, y, ParticleType.GAMMA, vx, vy)]
+    return [Particle(x, y, ParticleType.GAMMA, int(vx), int(vy))]
 
 def create_neutron(x, y):
     angle = random.uniform(0, 2 * math.pi)
     speed = 60
     vx = speed * math.cos(angle)
     vy = speed * math.sin(angle)
-    return [Particle(x, y, ParticleType.NEUTRON, vx, vy)]
+    return [Particle(x, y, ParticleType.NEUTRON, int(vx), int(vy))]
 
 def create_proton(x, y):
     angle = random.uniform(0, 2 * math.pi)
     speed = 50
     vx = speed * math.cos(angle)
     vy = speed * math.sin(angle)
-    return [Particle(x, y, ParticleType.PROTON, vx, vy)]
+    return [Particle(x, y, ParticleType.PROTON, int(vx), int(vy))]
 
 def create_fission(x, y):
     # Simplified fission - just creates multiple particles
@@ -382,9 +382,9 @@ def create_fission(x, y):
         
         # Randomly create either alpha particle or neutron
         if random.random() < 0.7:
-            particles.append(Particle(x, y, ParticleType.ALPHA, vx, vy))
+            particles.append(Particle(x, y, ParticleType.ALPHA, int(vx), int(vy)))
         else:
-            particles.append(Particle(x, y, ParticleType.NEUTRON, vx, vy))
+            particles.append(Particle(x, y, ParticleType.NEUTRON, int(vx), int(vy)))
     return particles
 
 class Nucleus:
