@@ -1,6 +1,6 @@
 import numpy as np
 import pyopencl as cl
-import pyopencl.array
+import pyopencl.array as cl_array
 import math
 from particles import ParticleType
 import logging
@@ -199,8 +199,8 @@ class NuclearForces:
             h_types[i] = 0 if p.type == ParticleType.PROTON else 1
         
         # Transfer to GPU
-        particles_buffer = cl.array.to_device(self.queue, h_particles)
-        types_buffer = cl.array.to_device(self.queue, h_types)
+        particles_buffer = cl_array.to_device(self.queue, h_particles)
+        types_buffer = cl_array.to_device(self.queue, h_types)
         
         # Calculate center of mass
         center_x = sum(p.x for p in particles) / len(particles)

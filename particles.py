@@ -21,7 +21,7 @@ class DecayType(Enum):
     SPONTANEOUS_FISSION = 7
 
 class Particle:
-    def __init__(self, x, y, particle_type, vx=0, vy=0):
+    def __init__(self, x, y, particle_type, vx=0.0, vy=0.0):
         self.x = x
         self.y = y
         self.type = particle_type
